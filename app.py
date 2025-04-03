@@ -30,8 +30,8 @@ overview_cols = ['status', 'technical.last_close', 'technical.trend', 'earnings.
 overview_df = df[df.index.isin(selected_stocks)][overview_cols]
 overview_df.columns = ['Status', 'Last Close', 'Trend', 'Next Earnings']
 st.dataframe(overview_df.style.format({
-    'Last Close': '{:.2f}',
-}), height=(len(selected_stocks) * 35 + 38)
+    'Last Close': '{:.2f}'
+}), height=(len(selected_stocks) * 35 + 38))
 
 # Technical Analysis Section
 st.header("Technical Analysis")
@@ -67,7 +67,7 @@ rsi_fig = go.Figure()
 for stock in selected_stocks:
     rsi_fig.add_trace(go.Bar(
         x=[stock],
-        y=[df.loc[stock, 'technical.rsi'],
+        y=[df.loc[stock, 'technical.rsi']],
         name=stock,
         text=f"{df.loc[stock, 'technical.rsi']:.2f}",
         textposition='auto'
@@ -146,7 +146,7 @@ st.subheader("Next Earnings Date Prediction")
 earnings_df = df[df.index.isin(selected_stocks)][['earnings.next_earnings_prediction', 'earnings.prediction_metadata.confidence_score']]
 earnings_df.columns = ['Next Earnings Date', 'Confidence Score']
 st.dataframe(earnings_df.style.format({
-    'Confidence Score': '{:.0f}%',
+    'Confidence Score': '{:.0f}%'
 }))
 
 # Earnings Interval Analysis
