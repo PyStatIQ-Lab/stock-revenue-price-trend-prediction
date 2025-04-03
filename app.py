@@ -9,8 +9,25 @@ from datetime import datetime
 with open('nifty50_analysis_results.json') as f:
     data = json.load(f)
 
-# Convert to DataFrame and flatten the nested structure
-df = pd.json_normalize(data).set_index('symbol')
+# Convert to DataFrame - each stock is a key in the main dictionary
+# We'll create a list of dictionaries with symbol included
+records = []
+for symbol, stock_data in data.items():
+    record = {'symbol': symbol}
+    # Flatten the nested structure
+    for category, values in stock_data.items():
+        if isinstance(values, dict):
+            for key, value in values.items():
+                if isinstance(value, dict):
+                    for subkey, subvalue in value.items():
+                        record[f"{category}.{key}.{subkey}"] = subvalue
+                else:
+                    record[f"{category}.{key}"] = value
+        else:
+            record[category] = values
+    records.append(record)
+
+df = pd.DataFrame(records).set_index('symbol')
 
 # Sidebar filters
 st.sidebar.title("Filters")
@@ -27,11 +44,14 @@ st.write("Comprehensive analysis of Nifty50 stocks including technical indicator
 # Overview section
 st.header("Stock Overview")
 overview_cols = ['status', 'technical.last_close', 'technical.trend', 'earnings.next_earnings_prediction']
-overview_df = df.loc[selected_stocks, overview_cols]
-overview_df.columns = ['Status', 'Last Close', 'Trend', 'Next Earnings']
+# Filter for columns that actually exist
+available_overview_cols = [col for col in overview_cols if col in df.columns]
+overview_df = df.loc[selected_stocks, available_overview_cols]
+overview_df.columns = ['Status', 'Last Close', 'Trend', 'Next Earnings'][:len(available_overview_cols)]
 st.dataframe(overview_df.style.format({
     'Last Close': '{:.2f}'
-}), height=(len(selected_stocks) * 35 + 38))
+} if 'Last Close' in overview_df.columns else {}), 
+height=(len(selected_stocks) * 35 + 38))
 
 # Technical Analysis Section
 st.header("Technical Analysis")
@@ -42,24 +62,28 @@ tech_cols = [
     'technical.macd_line', 'technical.macd_signal', 'technical.bb_upper', 
     'technical.bb_lower', 'technical.last_close'
 ]
-tech_df = df.loc[selected_stocks, tech_cols]
-tech_df.columns = [
-    'RSI', 'MA(20)', 'MA(50)', 'MA(200)', 'MACD Line', 'MACD Signal', 
-    'BB Upper', 'BB Lower', 'Last Close'
-]
+available_tech_cols = [col for col in tech_cols if col in df.columns]
+if available_tech_cols:
+    tech_df = df.loc[selected_stocks, available_tech_cols]
+    tech_df.columns = [
+        'RSI', 'MA(20)', 'MA(50)', 'MA(200)', 'MACD Line', 'MACD Signal', 
+        'BB Upper', 'BB Lower', 'Last Close'
+    ][:len(available_tech_cols)]
 
-# Normalize for comparison (except RSI which is already normalized)
-tech_normalized = tech_df.copy()
-for col in tech_normalized.columns:
-    if col != 'RSI' and tech_normalized[col].max() != tech_normalized[col].min():
-        tech_normalized[col] = (tech_normalized[col] - tech_normalized[col].min()) / (tech_normalized[col].max() - tech_normalized[col].min())
+    # Normalize for comparison (except RSI which is already normalized)
+    tech_normalized = tech_df.copy()
+    for col in tech_normalized.columns:
+        if col != 'RSI' and tech_normalized[col].max() != tech_normalized[col].min():
+            tech_normalized[col] = (tech_normalized[col] - tech_normalized[col].min()) / (tech_normalized[col].max() - tech_normalized[col].min())
 
-fig = px.bar(
-    tech_normalized.T, 
-    barmode='group',
-    title="Normalized Technical Indicators Comparison"
-)
-st.plotly_chart(fig, use_container_width=True)
+    fig = px.bar(
+        tech_normalized.T, 
+        barmode='group',
+        title="Normalized Technical Indicators Comparison"
+    )
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.warning("No technical data available for selected stocks")
 
 # RSI Analysis
 st.subheader("RSI Analysis")
