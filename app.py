@@ -1,243 +1,453 @@
 import streamlit as st
+import yfinance as yf
 import pandas as pd
-import json
-import plotly.express as px
-import plotly.graph_objects as go
-from datetime import datetime
+import pandas_ta as ta
+from datetime import datetime, timedelta
+import pytz
+from statsmodels.tsa.arima.model import ARIMA
+import warnings
+import time
+import numpy as np
+from dateutil.relativedelta import relativedelta
+from typing import Dict, Tuple, Optional, Any, List
 
-# Load the data
-with open('nifty50_analysis_results.json') as f:
-    data = json.load(f)
+# Suppress warnings
+warnings.filterwarnings('ignore')
 
-# Convert to DataFrame - each stock is a key in the main dictionary
-# We'll create a list of dictionaries with symbol included
-records = []
-for symbol, stock_data in data.items():
-    record = {'symbol': symbol}
-    # Flatten the nested structure
-    for category, values in stock_data.items():
-        if isinstance(values, dict):
-            for key, value in values.items():
-                if isinstance(value, dict):
-                    for subkey, subvalue in value.items():
-                        record[f"{category}.{key}.{subkey}"] = subvalue
-                else:
-                    record[f"{category}.{key}"] = value
-        else:
-            record[category] = values
-    records.append(record)
+# Configuration
+CONFIG = {
+    "analysis": {
+        "history_period": "200d",
+        "min_earnings_for_prediction": 4,
+        "forecast_horizon": 1,
+        "max_earnings_dates": 8
+    },
+    "api": {
+        "delay": 1,
+        "timeout": 15
+    }
+}
 
-df = pd.DataFrame(records).set_index('symbol')
-
-# Sidebar filters
-st.sidebar.title("Filters")
-selected_stocks = st.sidebar.multiselect(
-    "Select Stocks", 
-    df.index.tolist(), 
-    default=df.index.tolist()[:5]
-)
-
-# Main dashboard
-st.title("Nifty50 Stock Analysis Dashboard")
-st.write("Comprehensive analysis of Nifty50 stocks including technical indicators, fundamental metrics, and earnings predictions")
-
-# Overview section
-st.header("Stock Overview")
-overview_cols = ['status', 'technical.last_close', 'technical.trend', 'earnings.next_earnings_prediction']
-# Filter for columns that actually exist
-available_overview_cols = [col for col in overview_cols if col in df.columns]
-overview_df = df.loc[selected_stocks, available_overview_cols]
-overview_df.columns = ['Status', 'Last Close', 'Trend', 'Next Earnings'][:len(available_overview_cols)]
-st.dataframe(overview_df.style.format({
-    'Last Close': '{:.2f}'
-} if 'Last Close' in overview_df.columns else {}), 
-height=(len(selected_stocks) * 35 + 38))
-
-# Technical Analysis Section
-st.header("Technical Analysis")
-
-# Technical metrics comparison
-tech_cols = [
-    'technical.rsi', 'technical.ma_20', 'technical.ma_50', 'technical.ma_200',
-    'technical.macd_line', 'technical.macd_signal', 'technical.bb_upper', 
-    'technical.bb_lower', 'technical.last_close'
+# NIFTY50 stock list (as of knowledge cutoff in 2023)
+NIFTY50_STOCKS = [
+    'ADANIPORTS.NS', 'ASIANPAINT.NS', 'AXISBANK.NS', 'BAJAJ-AUTO.NS', 'BAJFINANCE.NS',
+    'BAJAJFINSV.NS', 'BPCL.NS', 'BHARTIARTL.NS', 'BRITANNIA.NS', 'CIPLA.NS',
+    'COALINDIA.NS', 'DIVISLAB.NS', 'DRREDDY.NS', 'EICHERMOT.NS', 'GRASIM.NS',
+    'HCLTECH.NS', 'HDFCBANK.NS', 'HDFCLIFE.NS', 'HEROMOTOCO.NS', 'HINDALCO.NS',
+    'HINDUNILVR.NS', 'ICICIBANK.NS', 'ITC.NS', 'INDUSINDBK.NS', 'INFY.NS',
+    'JSWSTEEL.NS', 'KOTAKBANK.NS', 'LT.NS', 'M&M.NS', 'MARUTI.NS',
+    'NTPC.NS', 'NESTLEIND.NS', 'ONGC.NS', 'POWERGRID.NS', 'RELIANCE.NS',
+    'SBILIFE.NS', 'SHREECEM.NS', 'SBIN.NS', 'SUNPHARMA.NS', 'TCS.NS',
+    'TATACONSUM.NS', 'TATASTEEL.NS', 'TECHM.NS', 'TITAN.NS', 'UPL.NS',
+    'ULTRACEMCO.NS', 'WIPRO.NS', 'HDFC.NS'
 ]
-available_tech_cols = [col for col in tech_cols if col in df.columns]
-if available_tech_cols:
-    tech_df = df.loc[selected_stocks, available_tech_cols]
-    tech_df.columns = [
-        'RSI', 'MA(20)', 'MA(50)', 'MA(200)', 'MACD Line', 'MACD Signal', 
-        'BB Upper', 'BB Lower', 'Last Close'
-    ][:len(available_tech_cols)]
 
-    # Normalize for comparison (except RSI which is already normalized)
-    tech_normalized = tech_df.copy()
-    for col in tech_normalized.columns:
-        if col != 'RSI' and tech_normalized[col].max() != tech_normalized[col].min():
-            tech_normalized[col] = (tech_normalized[col] - tech_normalized[col].min()) / (tech_normalized[col].max() - tech_normalized[col].min())
-
-    fig = px.bar(
-        tech_normalized.T, 
-        barmode='group',
-        title="Normalized Technical Indicators Comparison"
-    )
-    st.plotly_chart(fig, use_container_width=True)
-else:
-    st.warning("No technical data available for selected stocks")
-
-# RSI Analysis
-st.subheader("RSI Analysis")
-rsi_fig = go.Figure()
-for stock in selected_stocks:
-    rsi_value = df.loc[stock, 'technical.rsi']
-    if pd.notna(rsi_value):
-        rsi_fig.add_trace(go.Bar(
-            x=[stock],
-            y=[rsi_value],
-            name=stock,
-            text=f"{rsi_value:.2f}",
-            textposition='auto'
-        ))
-rsi_fig.add_hline(y=70, line_dash="dash", line_color="red", annotation_text="Overbought")
-rsi_fig.add_hline(y=30, line_dash="dash", line_color="green", annotation_text="Oversold")
-rsi_fig.update_layout(title="RSI Values", yaxis_title="RSI")
-st.plotly_chart(rsi_fig, use_container_width=True)
-
-# Moving Averages
-st.subheader("Moving Averages vs Last Close")
-ma_fig = go.Figure()
-for stock in selected_stocks:
-    ma_20 = df.loc[stock, 'technical.ma_20']
-    ma_50 = df.loc[stock, 'technical.ma_50']
-    ma_200 = df.loc[stock, 'technical.ma_200']
-    last_close = df.loc[stock, 'technical.last_close']
+class StockAnalyzer:
+    """Streamlit-compatible stock analyzer"""
     
-    if all(pd.notna(val) for val in [ma_20, ma_50, ma_200, last_close]):
-        ma_fig.add_trace(go.Bar(
-            x=['MA(20)', 'MA(50)', 'MA(200)', 'Last Close'],
-            y=[ma_20, ma_50, ma_200, last_close],
-            name=stock
-        ))
-ma_fig.update_layout(barmode='group', title="Moving Averages Comparison")
-st.plotly_chart(ma_fig, use_container_width=True)
+    def __init__(self):
+        self.stocks = NIFTY50_STOCKS
+        
+    def _safe_api_call(self, func, *args, **kwargs) -> Any:
+        """Robust API call wrapper with retries"""
+        try:
+            result = func(*args, **kwargs)
+            if result is None or (hasattr(result, 'empty') and result.empty:
+                raise ValueError("Empty API response")
+            return result
+        except Exception as e:
+            st.warning(f"API call failed: {str(e)}")
+            return None
 
-# Fundamental Analysis Section
-st.header("Fundamental Analysis")
+    def _analyze_earnings_pattern(self, dates: List[datetime]) -> Dict[str, Any]:
+        """Enhanced earnings date pattern analysis"""
+        if len(dates) < 2:
+            return {"error": "Insufficient historical data"}
+        
+        dates_series = pd.Series(dates).sort_values()
+        day_diffs = dates_series.diff().dt.days.dropna()
+        
+        month_diffs = []
+        for i in range(1, len(dates_series)):
+            delta = relativedelta(dates_series[i], dates_series[i-1])
+            month_diffs.append(delta.months + delta.years * 12)
+        
+        analysis = {
+            "last_date": dates_series.iloc[-1].strftime('%Y-%m-%d'),
+            "day_intervals": day_diffs.tolist(),
+            "month_intervals": month_diffs,
+            "avg_day_interval": int(np.mean(day_diffs)),
+            "median_day_interval": int(np.median(day_diffs)),
+            "avg_month_interval": np.mean(month_diffs),
+            "consistent_quarterly": all(2 <= m <= 4 for m in month_diffs)
+        }
+        
+        return analysis
 
-# Revenue and Profit Trends
-st.subheader("Revenue and Profit Trends")
-fundamental_metrics = st.selectbox(
-    "Select Metric", 
-    ['Total Revenue', 'Gross Profit', 'Operating Income', 'Net Income']
-)
+    def _predict_next_earnings(self, dates: List[datetime]) -> Tuple[Optional[str], Dict[str, Any]]:
+        """Improved earnings date prediction"""
+        try:
+            if len(dates) < CONFIG["analysis"]["min_earnings_for_prediction"]:
+                return None, {"warning": "Insufficient history for prediction"}
+            
+            dates_series = pd.Series(dates).sort_values()
+            analysis = self._analyze_earnings_pattern(dates)
+            
+            last_date = dates_series.iloc[-1]
+            predicted_date = last_date + timedelta(days=analysis["median_day_interval"])
+            
+            if predicted_date.weekday() >= 5:
+                predicted_date += timedelta(days=7 - predicted_date.weekday())
+            
+            confidence = min(90, len(dates) * 15)
+            
+            return predicted_date.strftime('%Y-%m-%d'), {
+                **analysis,
+                "confidence_score": confidence,
+                "prediction_method": "median_day_interval"
+            }
+            
+        except Exception as e:
+            st.error(f"Date prediction failed: {str(e)}")
+            return None, {"error": str(e)}
 
-fund_fig = go.Figure()
-for stock in selected_stocks:
-    historical_data = df.loc[stock, 'fundamental.historical']
-    if isinstance(historical_data, dict) and fundamental_metrics in historical_data:
-        metric_data = historical_data[fundamental_metrics]
-        if isinstance(metric_data, dict):
-            dates = list(metric_data.keys())
-            values = list(metric_data.values())
-            if all(isinstance(v, (int, float)) for v in values):
-                fund_fig.add_trace(go.Scatter(
-                    x=dates,
-                    y=values,
-                    mode='lines+markers',
-                    name=stock
-                ))
-fund_fig.update_layout(title=f"{fundamental_metrics} Trend")
-st.plotly_chart(fund_fig, use_container_width=True)
+    def get_earnings_analysis(self, ticker: str) -> Dict[str, Any]:
+        """Complete earnings date analysis"""
+        try:
+            stock = self._safe_api_call(yf.Ticker, ticker)
+            if stock is None:
+                return {"error": "Failed to fetch stock data"}
+                
+            earnings_dates = self._safe_api_call(lambda: stock.earnings_dates)
+            
+            if earnings_dates is None or earnings_dates.empty:
+                return {"error": "No earnings dates available"}
+            
+            dates = earnings_dates.index.tolist()
+            dates = [pd.to_datetime(d) for d in dates if d <= datetime.now(pytz.utc)]
+            dates = sorted(dates)[-CONFIG["analysis"]["max_earnings_dates"]:]
+            
+            if not dates:
+                return {"error": "No valid historical dates"}
+            
+            next_date, prediction_meta = self._predict_next_earnings(dates)
+            
+            return {
+                "next_earnings_prediction": next_date,
+                "prediction_metadata": prediction_meta,
+                "historical_dates": [d.strftime('%Y-%m-%d') for d in dates]
+            }
+            
+        except Exception as e:
+            st.error(f"Earnings analysis failed for {ticker}: {str(e)}")
+            return {"error": str(e)}
 
-# EPS Analysis
-st.subheader("EPS Analysis")
-eps_fig = go.Figure()
-for stock in selected_stocks:
-    historical_data = df.loc[stock, 'fundamental.historical']
-    if isinstance(historical_data, dict) and 'Basic EPS' in historical_data:
-        eps_data = historical_data['Basic EPS']
-        if isinstance(eps_data, dict):
-            dates = list(eps_data.keys())
-            values = list(eps_data.values())
-            if all(isinstance(v, (int, float)) for v in values):
-                eps_fig.add_trace(go.Scatter(
-                    x=dates,
-                    y=values,
-                    mode='lines+markers',
-                    name=stock
-                ))
-eps_fig.update_layout(title="Basic EPS Trend")
-st.plotly_chart(eps_fig, use_container_width=True)
+    def get_technical_analysis(self, ticker: str) -> Dict[str, Any]:
+        """Comprehensive technical analysis"""
+        try:
+            history = self._safe_api_call(
+                lambda: yf.Ticker(ticker).history(
+                    period=CONFIG["analysis"]["history_period"],
+                    timeout=CONFIG["api"]["timeout"]
+                )
+            )
+            
+            if history is None or history.empty:
+                return {"error": "No historical price data"}
+            
+            indicators = {
+                "last_close": float(history['Close'].iloc[-1]),
+                "last_volume": int(history['Volume'].iloc[-1]),
+                "last_date": history.index[-1].strftime('%Y-%m-%d')
+            }
+            
+            for days in [20, 50, 200]:
+                history.ta.sma(length=days, append=True, col_names=(f'ma_{days}',))
+                indicators[f'ma_{days}'] = float(history[f'ma_{days}'].iloc[-1])
+            
+            history.ta.rsi(length=14, append=True, col_names=('rsi',))
+            indicators['rsi'] = float(history['rsi'].iloc[-1])
+            
+            history.ta.macd(append=True)
+            indicators['macd_line'] = float(history['MACD_12_26_9'].iloc[-1])
+            indicators['macd_signal'] = float(history['MACDs_12_26_9'].iloc[-1])
+            
+            history.ta.bbands(append=True)
+            indicators['bb_upper'] = float(history['BBU_5_2.0'].iloc[-1])
+            indicators['bb_lower'] = float(history['BBL_5_2.0'].iloc[-1])
+            
+            volume_mean = history['Volume'].mean()
+            volume_std = history['Volume'].std()
+            indicators['volume_z'] = (indicators['last_volume'] - volume_mean) / volume_std if volume_std > 0 else 0
+            
+            indicators['trend'] = self._determine_trend(history, indicators)
+            
+            return indicators
+            
+        except Exception as e:
+            st.error(f"Technical analysis failed for {ticker}: {str(e)}")
+            return {"error": str(e)}
 
-# Earnings Section
-st.header("Earnings Analysis")
+    def _determine_trend(self, data: pd.DataFrame, indicators: Dict) -> str:
+        """Enhanced trend determination"""
+        try:
+            close = indicators['last_close']
+            ma_20 = indicators['ma_20']
+            ma_50 = indicators['ma_50']
+            ma_200 = indicators['ma_200']
+            rsi = indicators['rsi']
+            volume_z = indicators['volume_z']
+            
+            price_above = sum(close > ma for ma in [ma_20, ma_50, ma_200])
+            ma_order = int(ma_20 > ma_50 > ma_200)
+            
+            score = (
+                price_above * 0.4 +
+                ma_order * 0.3 +
+                (0 if rsi > 70 else 1 if rsi < 30 else 0.5) * 0.2 +
+                (1 if volume_z > 2 else 0 if volume_z < -2 else 0.5) * 0.1
+            )
+            
+            if score > 2.5:
+                return "Strong Bullish"
+            elif score > 1.8:
+                return "Bullish"
+            elif score > 1.2:
+                return "Mild Bullish"
+            elif score > 0.8:
+                return "Neutral"
+            elif score > 0.5:
+                return "Mild Bearish"
+            elif score > 0.2:
+                return "Bearish"
+            else:
+                return "Strong Bearish"
+                
+        except:
+            return "Unknown"
 
-# Earnings Date Prediction
-st.subheader("Next Earnings Date Prediction")
-if 'earnings.next_earnings_prediction' in df.columns and 'earnings.prediction_metadata.confidence_score' in df.columns:
-    earnings_df = df.loc[selected_stocks, ['earnings.next_earnings_prediction', 'earnings.prediction_metadata.confidence_score']]
-    earnings_df.columns = ['Next Earnings Date', 'Confidence Score']
-    st.dataframe(earnings_df.style.format({
-        'Confidence Score': '{:.0f}%'
-    }))
+    def get_fundamental_analysis(self, ticker: str) -> Dict[str, Any]:
+        """Comprehensive fundamental analysis with validation"""
+        try:
+            stock = self._safe_api_call(yf.Ticker, ticker)
+            if stock is None:
+                return {"error": "Failed to fetch stock data"}
+                
+            financials = self._safe_api_call(lambda: stock.quarterly_financials)
+            
+            if financials is None or financials.empty:
+                return {"error": "No financial data available"}
+                
+            financials = financials.T
+            financials.index = pd.to_datetime(financials.index)
+            financials = financials.sort_index()
+            
+            metrics = [
+                'Total Revenue', 'Gross Profit', 'Operating Income',
+                'Net Income', 'Basic EPS', 'Diluted EPS',
+                'Total Expenses', 'Cost Of Revenue', 'Operating Expense',
+                'Depreciation And Amortization', 'Tax Provision'
+            ]
+            
+            results = {"historical": {}, "predictions": {}}
+            
+            for metric in metrics:
+                if metric not in financials.columns:
+                    continue
+                    
+                series = pd.to_numeric(financials[metric], errors='coerce')
+                series = series[~series.isna()]
+                
+                if series.empty:
+                    continue
+                
+                hist = series.tail(4)
+                results["historical"][metric] = {
+                    d.strftime('%Y-%m-%d'): float(v) for d, v in hist.items()
+                }
+                
+                if len(series) >= 3:
+                    try:
+                        model = ARIMA(series, order=(1,1,1))
+                        model_fit = model.fit()
+                        forecast = model_fit.forecast(steps=CONFIG["analysis"]["forecast_horizon"])
+                        results["predictions"][metric] = float(forecast[0])
+                    except:
+                        results["predictions"][metric] = None
+            
+            return results
+            
+        except Exception as e:
+            st.error(f"Fundamental analysis failed for {ticker}: {str(e)}")
+            return {"error": str(e)}
 
-# Error Analysis
-st.header("Error Analysis")
-if 'status' in df.columns:
-    error_stocks = df[df['status'] == 'failed'].index.tolist()
-    if error_stocks:
-        st.warning(f"The following stocks encountered errors during analysis: {', '.join(error_stocks)}")
-        selected_error = st.selectbox("Select stock to view error details", error_stocks)
-        if 'error' in df.columns:
-            st.code(df.loc[selected_error, 'error'], language='python')
-    else:
-        st.success("No errors encountered in the analysis")
+    def analyze_stock(self, ticker: str) -> Dict[str, Any]:
+        """Complete analysis for a single stock"""
+        analysis = {
+            "symbol": ticker,
+            "timestamp": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
+            "status": "completed",
+            "earnings": {},
+            "technical": {},
+            "fundamental": {}
+        }
+        
+        try:
+            analysis["earnings"] = self.get_earnings_analysis(ticker)
+            analysis["technical"] = self.get_technical_analysis(ticker)
+            analysis["fundamental"] = self.get_fundamental_analysis(ticker)
+        except Exception as e:
+            analysis["status"] = "failed"
+            analysis["error"] = str(e)
+        
+        return analysis
 
-# Stock Details Section
-st.header("Detailed Stock Analysis")
-selected_detail = st.selectbox("Select stock for detailed view", selected_stocks)
+# Streamlit UI
+def main():
+    st.set_page_config(
+        page_title="NIFTY50 Stock Analyzer",
+        page_icon="📈",
+        layout="wide"
+    )
+    
+    st.title("📈 NIFTY50 Stock Analyzer")
+    st.markdown("""
+        Comprehensive analysis of NIFTY50 stocks including:
+        - Earnings date predictions
+        - Technical indicators
+        - Fundamental metrics
+    """)
+    
+    analyzer = StockAnalyzer()
+    
+    # Sidebar controls
+    st.sidebar.header("Analysis Options")
+    selected_stock = st.sidebar.selectbox(
+        "Select a Stock", 
+        NIFTY50_STOCKS,
+        index=NIFTY50_STOCKS.index('RELIANCE.NS')
+    )
+    
+    analyze_button = st.sidebar.button("Analyze Selected Stock")
+    analyze_all_button = st.sidebar.button("Analyze All NIFTY50 Stocks (Takes Time)")
+    
+    if analyze_button or analyze_all_button:
+        if analyze_all_button:
+            st.warning("This will take several minutes to complete. Please be patient.")
+            progress_bar = st.progress(0)
+            results = {}
+            
+            for i, ticker in enumerate(analyzer.stocks):
+                results[ticker] = analyzer.analyze_stock(ticker)
+                progress_bar.progress((i + 1) / len(analyzer.stocks))
+                time.sleep(CONFIG["api"]["delay"])
+            
+            st.success("Analysis completed!")
+            
+            # Display summary table
+            st.subheader("NIFTY50 Analysis Summary")
+            summary_data = []
+            
+            for ticker, analysis in results.items():
+                if analysis.get("status") == "completed":
+                    tech = analysis.get("technical", {})
+                    earnings = analysis.get("earnings", {})
+                    
+                    summary_data.append({
+                        "Stock": ticker.replace('.NS', ''),
+                        "Price": tech.get("last_close", "N/A"),
+                        "Trend": tech.get("trend", "N/A"),
+                        "RSI": tech.get("rsi", "N/A"),
+                        "Next Earnings": earnings.get("next_earnings_prediction", "N/A"),
+                        "Confidence": earnings.get("prediction_metadata", {}).get("confidence_score", "N/A")
+                    })
+            
+            df = pd.DataFrame(summary_data)
+            st.dataframe(df.style.format({
+                "Price": "{:.2f}",
+                "RSI": "{:.1f}",
+                "Confidence": "{:.0f}"
+            }))
+            
+        else:
+            with st.spinner(f"Analyzing {selected_stock}..."):
+                analysis = analyzer.analyze_stock(selected_stock)
+            
+            if analysis.get("status") == "completed":
+                st.success(f"Analysis completed for {selected_stock}")
+                
+                # Display results in tabs
+                tab1, tab2, tab3 = st.tabs(["Technical", "Earnings", "Fundamental"])
+                
+                with tab1:
+                    st.subheader("Technical Analysis")
+                    tech = analysis.get("technical", {})
+                    
+                    if tech.get("error"):
+                        st.error(tech["error"])
+                    else:
+                        col1, col2, col3 = st.columns(3)
+                        
+                        with col1:
+                            st.metric("Current Price", f"₹{tech['last_close']:.2f}")
+                            st.metric("Volume", f"{tech['last_volume']:,}")
+                            st.metric("Trend", tech['trend'])
+                            
+                        with col2:
+                            st.metric("RSI (14)", f"{tech['rsi']:.1f}", 
+                                      help="Overbought (>70), Oversold (<30)")
+                            st.metric("20-day MA", f"₹{tech['ma_20']:.2f}")
+                            st.metric("50-day MA", f"₹{tech['ma_50']:.2f}")
+                            
+                        with col3:
+                            st.metric("200-day MA", f"₹{tech['ma_200']:.2f}")
+                            st.metric("MACD", f"{tech['macd_line']:.2f} / {tech['macd_signal']:.2f}")
+                            st.metric("Bollinger Bands", 
+                                     f"₹{tech['bb_lower']:.2f} - ₹{tech['bb_upper']:.2f}")
+                
+                with tab2:
+                    st.subheader("Earnings Analysis")
+                    earnings = analysis.get("earnings", {})
+                    
+                    if earnings.get("error"):
+                        st.error(earnings["error"])
+                    else:
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.metric("Next Earnings Prediction", 
+                                     earnings.get("next_earnings_prediction", "N/A"))
+                            st.metric("Confidence Score", 
+                                     f"{earnings.get('prediction_metadata', {}).get('confidence_score', 'N/A')}%")
+                            
+                        with col2:
+                            st.metric("Last Earnings Date", 
+                                     earnings.get('prediction_metadata', {}).get('last_date', 'N/A'))
+                            st.metric("Average Interval", 
+                                     f"{earnings.get('prediction_metadata', {}).get('avg_day_interval', 'N/A')} days")
+                        
+                        st.subheader("Historical Earnings Dates")
+                        st.write(pd.DataFrame({
+                            "Date": earnings.get("historical_dates", [])
+                        }))
+                
+                with tab3:
+                    st.subheader("Fundamental Analysis")
+                    fund = analysis.get("fundamental", {})
+                    
+                    if fund.get("error"):
+                        st.error(fund["error"])
+                    else:
+                        st.subheader("Recent Financials")
+                        if fund.get("historical"):
+                            st.dataframe(pd.DataFrame(fund["historical"]).T)
+                        
+                        st.subheader("Next Quarter Predictions")
+                        if fund.get("predictions"):
+                            st.dataframe(pd.DataFrame(fund["predictions"], index=["Prediction"]).T)
+            
+            else:
+                st.error(f"Analysis failed: {analysis.get('error', 'Unknown error')}")
 
-st.subheader(f"Details for {selected_detail}")
-
-col1, col2 = st.columns(2)
-
-with col1:
-    st.markdown("**Technical Indicators**")
-    if 'technical' in df.columns:
-        tech_data = df.loc[selected_detail, 'technical']
-        if isinstance(tech_data, dict):
-            tech_df = pd.DataFrame.from_dict(tech_data, orient='index', columns=['Value'])
-            st.dataframe(tech_df.style.format({'Value': '{:.2f}'}))
-
-with col2:
-    st.markdown("**Earnings Information**")
-    if 'earnings' in df.columns:
-        earnings_data = df.loc[selected_detail, 'earnings']
-        if isinstance(earnings_data, dict):
-            if 'next_earnings_prediction' in earnings_data:
-                st.metric("Next Earnings Prediction", earnings_data['next_earnings_prediction'])
-            if 'prediction_metadata' in earnings_data and isinstance(earnings_data['prediction_metadata'], dict):
-                pred_meta = earnings_data['prediction_metadata']
-                if 'confidence_score' in pred_meta:
-                    st.metric("Confidence Score", f"{pred_meta['confidence_score']}%")
-                if 'prediction_method' in pred_meta:
-                    st.metric("Prediction Method", pred_meta['prediction_method'])
-                if 'consistent_quarterly' in pred_meta:
-                    st.write(f"Consistent Quarterly: {'Yes' if pred_meta['consistent_quarterly'] else 'No'}")
-
-# Historical Earnings Dates
-if 'earnings' in df.columns:
-    earnings_data = df.loc[selected_detail, 'earnings']
-    if isinstance(earnings_data, dict) and 'historical_dates' in earnings_data and isinstance(earnings_data['historical_dates'], list):
-        st.subheader("Historical Earnings Dates")
-        dates = pd.to_datetime(earnings_data['historical_dates'])
-        dates_df = pd.DataFrame({'Date': dates.sort_values(ascending=False)})
-        st.dataframe(dates_df)
-
-# Fundamental Predictions
-st.subheader("Fundamental Predictions")
-if 'fundamental.predictions' in df.columns:
-    preds = df.loc[selected_detail, 'fundamental.predictions']
-    if isinstance(preds, dict):
-        preds_df = pd.DataFrame.from_dict(preds, orient='index', columns=['Predicted Value'])
-        st.dataframe(preds_df.style.format({'Predicted Value': '{:.2f}'}))
+if __name__ == "__main__":
+    main()
